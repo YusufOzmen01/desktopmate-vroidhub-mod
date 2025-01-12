@@ -1,40 +1,80 @@
-﻿using System.IO;
-using System.Runtime.InteropServices;
-using CustomAvatarLoader;
+﻿using CustomAvatarLoader.Chara;
+using CustomAvatarLoader.Helpers;
+
+namespace CustomAvatarLoader;
+
+using Logging;
+using Modules;
+using Versioning;
 using Il2Cpp;
 using Il2CppUniGLTF;
 using Il2CppUniVRM10;
 using MelonLoader;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 using UnityEngine;
-
-[assembly: MelonInfo(typeof(Core), "Custom Avatar Loader Mod", "1.0.3", "SergioMarquina, Misandrie")]
-[assembly: MelonGame("infiniteloop", "DesktopMate")]
-
-namespace CustomAvatarLoader;
+using System.Reflection;
 
 public class Core : MelonMod
 {
-    CharaData _charaData;
-    RuntimeAnimatorController _runtimeAnimatorController;
-    private MelonPreferences_Category _settings;
-    private MelonPreferences_Entry<string> _vrmPath;
+    private const string RepositoryName = "YusufOzmen01/desktopmate-custom-avatar-loader";
+    private bool _init;
+
+    protected virtual IServiceProvider Services { get; }
+    
+    private Logging.ILogger Logger { get; set; }
+
+    private GitHubVersionChecker VersionChecker { get; set; }
+    
+    private Updater Updater { get; set; }
+    
+    private FileHelper FileHelper { get; set; }
+    
+    private CharaLoader CharaLoader { get; set; }
+
+    private string CurrentVersion { get; set; }
+
+    private MelonPreferences_Category Settings { get; set; }
+
+    private MelonPreferences_Entry<string> VrmPath { get; set; }
 
     public override void OnInitializeMelon()
     {
-        _settings = MelonPreferences.CreateCategory("settings");
-        _vrmPath = _settings.CreateEntry("vrmPath", "");
-    }
+        CurrentVersion = Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "0";
 
-    private bool _init = false;
+        Logger = new MelonLoaderLogger(LoggerInstance);
+        VersionChecker = new GitHubVersionChecker(RepositoryName, Logger);
+        Updater = new Updater(RepositoryName, Logger);
+        FileHelper = new FileHelper();
+        CharaLoader = new CharaLoader(Logger);
+
+        if (CurrentVersion == "0")
+            Logger.Warn("CurrentVersion is 0, faulty module version?");
+        
+        // Initialize your preferences
+        Settings = MelonPreferences.CreateCategory("settings");
+        VrmPath = Settings.CreateEntry("vrmPath", "");
+
+        var hasLatestVersion = VersionChecker.IsLatestVersionInstalled(CurrentVersion);
+
+        if (!hasLatestVersion)
+        {
+            Updater.ShowUpdateMessageBox();
+        }
+        else
+        {
+            Logger.Info("[VersionCheck] Latest version installed");
+        }
+    }
 
     public override void OnUpdate()
     {
         if (Input.GetKeyDown(KeyCode.F4))
         {
             string path = FileHelper.OpenFileDialog();
-            if (!string.IsNullOrEmpty(path) && LoadCharacter(path))
+            if (!string.IsNullOrEmpty(path) && CharaLoader.LoadCharacter(path))
             {
-                _vrmPath.Value = path;
+                VrmPath.Value = path;
                 _init = true;
                 MelonPreferences.Save();
             }
@@ -43,93 +83,13 @@ public class Core : MelonMod
         if (!_init && GameObject.Find("/CharactersRoot").transform.GetChild(0) != null)
         {
             _init = true;
-            if (_vrmPath.Value != "") LoadCharacter(_vrmPath.Value);
+            if (VrmPath.Value != "") CharaLoader.LoadCharacter(VrmPath.Value);
         }
 
-        if (!_init || GameObject.Find("/CharactersRoot/VRMFILE") != null || _vrmPath.Value == "") 
+        if (!_init || GameObject.Find("/CharactersRoot/VRMFILE") != null || VrmPath.Value == "")
             return;
-        
-        _vrmPath.Value = "";
+
+        VrmPath.Value = "";
         MelonPreferences.Save();
-    }
-
-    private bool LoadCharacter(string path)
-    {
-        if (!File.Exists(path))
-        {
-            LoggerInstance.Error("VRM file does not exist: " + path);
-            return false;
-        }
-
-        GameObject newChara;
-        try
-        {
-            var data = new GlbFileParser(path).Parse();
-            var vrmdata = Vrm10Data.Parse(data);
-            if (vrmdata == null)
-            {
-                MigrationData migrationData;
-                Vrm10Data.Migrate(data, out vrmdata, out migrationData);
-                if (vrmdata == null)
-                {
-                    throw new System.Exception("Cannot load vrm file!");
-                }
-            }
-
-            var context = new Vrm10Importer(vrmdata);
-            var loaded = context.Load();
-
-            loaded.EnableUpdateWhenOffscreen();
-            loaded.ShowMeshes();
-            loaded.gameObject.name = "VRMFILE";
-            newChara = loaded.gameObject;
-        }
-        catch (System.Exception e)
-        {
-            LoggerInstance.Error("Error trying to load the VRM file! : " + e.Message);
-            return false;
-        }
-
-        var chara = GameObject.Find("/CharactersRoot").transform.GetChild(0).gameObject;
-        _charaData = chara.GetComponent<CharaData>();
-        _runtimeAnimatorController = chara.GetComponent<Animator>().runtimeAnimatorController;
-
-        LoggerInstance.Msg("Chara copied! Removing default chara...");
-        UnityEngine.Object.Destroy(chara);
-
-        newChara.transform.parent = GameObject.Find("/CharactersRoot").transform;
-
-        CharaData newCharaData = newChara.AddComponent<CharaData>();
-        CopyCharaData(_charaData, newCharaData);
-
-        MainManager manager = GameObject.Find("MainManager").GetComponent<MainManager>();
-        manager.charaData = newCharaData;
-
-        Animator charaAnimator = newChara.GetComponent<Animator>();
-        charaAnimator.applyRootMotion = true;
-        charaAnimator.cullingMode = AnimatorCullingMode.CullUpdateTransforms;
-        charaAnimator.runtimeAnimatorController = _runtimeAnimatorController;
-
-        LoggerInstance.Msg("Chara replaced!");
-
-        return true;
-    }
-
-    private void CopyCharaData(CharaData source, CharaData target)
-    {
-        target.alarmAnim = source.alarmAnim;
-        target.draggedAnims = source.draggedAnims;
-        target.hideLeftAnims = source.hideLeftAnims;
-        target.hideRightAnims = source.hideRightAnims;
-        target.jumpInAnim = source.jumpInAnim;
-        target.jumpOutAnim = source.jumpOutAnim;
-        target.pickedSittingAnim = source.pickedSittingAnim;
-        target.pickedStandingAnim = source.pickedStandingAnim;
-        target.sittingOneShotAnims = source.sittingOneShotAnims;
-        target.sittingRandomAnims = source.sittingRandomAnims;
-        target.standingOneShotAnims = source.standingOneShotAnims;
-        target.standingRandomAnims = source.standingRandomAnims;
-        target.strokedSittingAnim = source.strokedSittingAnim;
-        target.strokedStandingAnim = source.strokedStandingAnim;
     }
 }
